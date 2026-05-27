@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+
+# Large model files
+models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Environment variables
+.env
