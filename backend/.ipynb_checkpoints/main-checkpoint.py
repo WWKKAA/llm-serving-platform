@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from backend.config import settings
 from backend.schemas import ChatRequest, ChatResponse, HealthResponse, MetricsResponse
 from backend.vllm_client import vllm_client
+from backend.logger import logger
 
 
 app = FastAPI(
@@ -45,6 +46,16 @@ def chat(request: ChatRequest):
 
         metrics["success_requests"] += 1
         metrics["total_latency_ms"] += result["latency_ms"]
+        
+        logger.info(
+            f"request_id={request_id} | "
+            f"status=success | "
+            f"prompt_chars={sum(len(m['content']) for m in messages)} | "
+            f"prompt_tokens={result['prompt_tokens']} | "
+            f"completion_tokens={result['completion_tokens']} | "
+            f"total_tokens={result['total_tokens']} | "
+            f"latency_ms={result['latency_ms']}"
+        )
 
         return ChatResponse(
             request_id=request_id,
@@ -60,6 +71,13 @@ def chat(request: ChatRequest):
         metrics["failed_requests"] += 1
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         metrics["total_latency_ms"] += latency_ms
+        
+        logger.error(
+            f"request_id={request_id} | "
+            f"status=failed | "
+            f"latency_ms={latency_ms} | "
+            f"error={str(e)}"
+        )
 
         raise HTTPException(
             status_code=500,
@@ -99,16 +117,66 @@ def get_metrics():
 
 @app.post("/api/chat/stream")
 def chat_stream(request: ChatRequest):
+    request_id = str(uuid.uuid4())
+    start_time = time.perf_counter()
+
+    metrics["total_requests"] += 1
+
     temperature = request.temperature or settings.DEFAULT_TEMPERATURE
     max_tokens = request.max_tokens or settings.DEFAULT_MAX_TOKENS
     messages = [msg.model_dump() for msg in request.messages]
 
     def generate():
-        for token in vllm_client.stream_chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ):
-            yield token
+        first_token_logged = False
 
-    return StreamingResponse(generate(), media_type="text/plain")
+        try:
+            for item in vllm_client.stream_chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                content = item.get("content", "")
+                ttft_ms = item.get("ttft_ms", None)
+
+                # 很关键：这里只能 yield 真正的文本内容
+                if content is None or content == "":
+                    continue
+
+                if ttft_ms is not None and not first_token_logged:
+                    first_token_logged = True
+                    logger.info(
+                        f"request_id={request_id} | "
+                        f"status=stream_first_token | "
+                        f"ttft_ms={ttft_ms}"
+                    )
+
+                yield content
+
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            metrics["success_requests"] += 1
+            metrics["total_latency_ms"] += latency_ms
+
+            logger.info(
+                f"request_id={request_id} | "
+                f"status=stream_success | "
+                f"prompt_chars={sum(len(m['content']) for m in messages)} | "
+                f"latency_ms={latency_ms}"
+            )
+
+        except Exception as e:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            metrics["failed_requests"] += 1
+            metrics["total_latency_ms"] += latency_ms
+
+            logger.error(
+                f"request_id={request_id} | "
+                f"status=stream_failed | "
+                f"latency_ms={latency_ms} | "
+                f"error={str(e)}"
+            )
+
+            yield f"\n[ERROR] request_id={request_id}, error={str(e)}"
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
