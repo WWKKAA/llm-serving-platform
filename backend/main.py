@@ -119,35 +119,64 @@ def get_metrics():
 def chat_stream(request: ChatRequest):
     request_id = str(uuid.uuid4())
     start_time = time.perf_counter()
+
+    metrics["total_requests"] += 1
+
     temperature = request.temperature or settings.DEFAULT_TEMPERATURE
     max_tokens = request.max_tokens or settings.DEFAULT_MAX_TOKENS
     messages = [msg.model_dump() for msg in request.messages]
 
-def generate():
-    try:
-        for token in vllm_client.stream_chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ):
-            yield token
+    def generate():
+        first_token_logged = False
 
-        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        logger.info(
-            f"request_id={request_id} | "
-            f"status=stream_success | "
-            f"prompt_chars={sum(len(m['content']) for m in messages)} | "
-            f"latency_ms={latency_ms}"
-        )
+        try:
+            for item in vllm_client.stream_chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                content = item.get("content", "")
+                ttft_ms = item.get("ttft_ms", None)
 
-    except Exception as e:
-        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        logger.error(
-            f"request_id={request_id} | "
-            f"status=stream_failed | "
-            f"latency_ms={latency_ms} | "
-            f"error={str(e)}"
-        )
-        yield f"\n[ERROR] request_id={request_id}, error={str(e)}"
+                # 很关键：这里只能 yield 真正的文本内容
+                if content is None or content == "":
+                    continue
 
-    return StreamingResponse(generate(), media_type="text/plain")
+                if ttft_ms is not None and not first_token_logged:
+                    first_token_logged = True
+                    logger.info(
+                        f"request_id={request_id} | "
+                        f"status=stream_first_token | "
+                        f"ttft_ms={ttft_ms}"
+                    )
+
+                yield content
+
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            metrics["success_requests"] += 1
+            metrics["total_latency_ms"] += latency_ms
+
+            logger.info(
+                f"request_id={request_id} | "
+                f"status=stream_success | "
+                f"prompt_chars={sum(len(m['content']) for m in messages)} | "
+                f"latency_ms={latency_ms}"
+            )
+
+        except Exception as e:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            metrics["failed_requests"] += 1
+            metrics["total_latency_ms"] += latency_ms
+
+            logger.error(
+                f"request_id={request_id} | "
+                f"status=stream_failed | "
+                f"latency_ms={latency_ms} | "
+                f"error={str(e)}"
+            )
+
+            yield f"\n[ERROR] request_id={request_id}, error={str(e)}"
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")

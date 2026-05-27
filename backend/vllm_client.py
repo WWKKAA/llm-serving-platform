@@ -47,13 +47,18 @@ class VLLMClient:
             "total_tokens": total_tokens,
             "latency_ms": latency_ms,
         }
+    
+
 
     def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages,
         temperature: float,
         max_tokens: int,
-    ) -> Generator[str, None, None]:
+    ):
+        start_time = time.perf_counter()
+        first_token_time = None
+
         response = self.client.chat.completions.create(
             model=settings.MODEL_NAME,
             messages=messages,
@@ -67,8 +72,22 @@ class VLLMClient:
                 continue
 
             delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+            content = getattr(delta, "content", None)
+
+        # 很关键：跳过 None 和空字符串
+            if content is None or content == "":
+                continue
+
+            if first_token_time is None:
+                first_token_time = time.perf_counter()
+                ttft_ms = round((first_token_time - start_time) * 1000, 2)
+            else:
+                ttft_ms = None
+
+            yield {
+                "content": content,
+                "ttft_ms": ttft_ms,
+            }
 
 
 vllm_client = VLLMClient()
